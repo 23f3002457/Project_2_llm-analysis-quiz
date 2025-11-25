@@ -3,6 +3,8 @@ import re
 import time
 import io
 from urllib.parse import urlparse, urljoin
+import subprocess
+import threading
 
 import requests
 from dotenv import load_dotenv
@@ -36,19 +38,62 @@ def load_rendered_page(url: str):
     """
     Open the given URL in a headless Chromium browser and return
     (rendered_html, final_url_after_redirects).
+
+    If Chromium is not installed, install it once at runtime and retry.
     """
     print(f"[browser] Opening URL in Playwright: {url}")
-    with sync_playwright() as p:
-        # If you installed system chromium instead of playwright's, use:
-        # browser = p.chromium.launch(headless=True, executable_path="/usr/bin/chromium")
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle")
-        html = page.content()
-        final_url = page.url
-        browser.close()
-    print(f"[browser] Finished loading. Final URL: {final_url}")
-    return html, final_url
+
+    def _open():
+        with sync_playwright() as p:
+            # If you ever want to use system chromium instead, you can set executable_path here.
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle")
+            html = page.content()
+            final_url = page.url
+            browser.close()
+        print(f"[browser] Finished loading. Final URL: {final_url}")
+        return html, final_url
+
+    # First attempt
+    try:
+        return _open()
+    except Exception as e:
+        msg = str(e)
+        # Specific Playwright error when browser binary is missing
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            print("[browser] Chromium not found. Running runtime installer...")
+            ensure_playwright_browsers_installed()
+            # Retry once after install
+            return _open()
+        # If it's some other error, re-raise
+        raise
+
+
+_playwright_install_lock = threading.Lock()
+_playwright_installed = False
+
+
+def ensure_playwright_browsers_installed():
+    """
+    Ensure Chromium is installed for Playwright.
+    Safe to call multiple times (only installs once per process).
+    """
+    global _playwright_installed
+    if _playwright_installed:
+        return
+
+    with _playwright_install_lock:
+        if _playwright_installed:
+            return
+        print("[playwright] Installing Chromium (runtime fallback)...")
+        # This will download Chromium into the same cache path Playwright expects
+        subprocess.run(
+            ["python", "-m", "playwright", "install", "chromium"],
+            check=True,
+        )
+        _playwright_installed = True
+        print("[playwright] Chromium install complete.")
 
 
 # ------------------ PARSER ------------------

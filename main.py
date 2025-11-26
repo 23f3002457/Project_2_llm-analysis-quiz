@@ -4,7 +4,7 @@ import time
 import io
 import subprocess
 import threading
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse, urljoin
 
 import requests
@@ -64,7 +64,7 @@ def ensure_playwright_browsers_installed() -> None:
         print("[playwright] Chromium install complete.")
 
 
-def load_rendered_page(url: str) -> (str, str):
+def load_rendered_page(url: str) -> Tuple[str, str]:
     """
     Open the given URL in a headless Chromium browser and return
     (rendered_html, final_url_after_redirects).
@@ -73,7 +73,7 @@ def load_rendered_page(url: str) -> (str, str):
     """
     print(f"[browser] Opening URL in Playwright: {url}")
 
-    def _open() -> (str, str):
+    def _open() -> Tuple[str, str]:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
@@ -97,6 +97,36 @@ def load_rendered_page(url: str) -> (str, str):
             return _open()
         # Different error → bubble up
         raise
+
+
+# ============================================================
+# AIPipe audio transcription hook
+# ============================================================
+
+def transcribe_with_aipipe(audio_bytes: bytes) -> str:
+    """
+    Transcribe audio using AIPipe (placeholder).
+
+    Replace this function body with your real AIPipe integration, e.g.:
+
+        from aipipe import AudioTranscriber
+
+        def transcribe_with_aipipe(audio_bytes: bytes) -> str:
+            transcriber = AudioTranscriber(model="whisper-large")
+            return transcriber.transcribe_bytes(audio_bytes)
+
+    For now, this is a stub that raises if not replaced.
+    """
+    # TODO: replace this with real AIPipe code
+    # For safety in the assignment, we return a dummy text instead of crashing.
+    print("[audio] WARNING: transcribe_with_aipipe is currently a stub.")
+    return "dummy transcription from aipipe (replace with real AIPipe call)"
+
+
+def is_audio_url(url: str) -> bool:
+    url_l = url.lower()
+    return url_l.endswith(".mp3") or url_l.endswith(".wav") or \
+        url_l.endswith(".ogg") or url_l.endswith(".m4a")
 
 
 # ============================================================
@@ -127,7 +157,10 @@ def extract_quiz_details(html: str, page_url: str) -> Dict[str, Any]:
             submit_url = urljoin(base, rel_path)
 
     # 3) File URLs in href/src
-    exts = [".pdf", ".csv", ".xlsx", ".xls", ".json", ".txt"]
+    exts = [
+        ".pdf", ".csv", ".xlsx", ".xls", ".json", ".txt",
+        ".mp3", ".wav", ".ogg", ".m4a",
+    ]
     file_urls: List[str] = []
 
     for tag in soup.find_all(["a", "audio", "video", "source", "link"]):
@@ -309,7 +342,30 @@ def compute_answer(raw_text: str, page_url: str, file_urls: List[str]) -> Any:
         print("[compute_answer] Could not find demo-scrape-data URL, returning fallback.")
         return "missing-demo-scrape-secret"
 
-    # 2) Cutoff-based numeric question (e.g. demo-audio)
+    # 2) Audio-first handling: if we see an audio URL and
+    #    the question looks like a transcription task.
+    audio_candidates = [u for u in file_urls if is_audio_url(u)]
+    if audio_candidates and ("audio" in text_lower or "listen" in text_lower or "transcribe" in text_lower):
+        audio_url = audio_candidates[0]
+        print(f"[compute_answer] Detected audio quiz → using AIPipe on {audio_url}")
+        audio_bytes = download_bytes(audio_url)
+        transcript = transcribe_with_aipipe(audio_bytes)
+        print("[compute_answer] Transcript from AIPipe:", transcript[:300])
+
+        # If the transcript contains "answer is X", try to extract X
+        m_ans = re.search(r"answer\s+is\s+([0-9A-Za-z_\-]+)", transcript, flags=re.IGNORECASE)
+        if m_ans:
+            extracted = m_ans.group(1)
+            print(f"[compute_answer] Extracted explicit answer from transcript: {extracted}")
+            # If numeric, convert:
+            if re.fullmatch(r"\d+", extracted):
+                return int(extracted)
+            return extracted
+
+        # Otherwise return the whole transcript as the "answer"
+        return transcript
+
+    # 3) Cutoff-based numeric question (e.g. demo-audio / CSV questions)
     cutoff_match = re.search(r"Cutoff:\s*([\d\.]+)", raw_text, flags=re.IGNORECASE)
     cutoff = float(cutoff_match.group(1)) if cutoff_match else None
     if cutoff is not None:
